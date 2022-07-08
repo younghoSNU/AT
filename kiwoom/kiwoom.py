@@ -1,7 +1,9 @@
+import os
 from PyQt5.QAxContainer import *  # Kiwoon클래스가 상속받는 QAxWidget클래스를 갖고 있다
 from PyQt5.QtCore import *  # QEventLoop를 갖는다
 from config.errorCode import error_code
-
+from PyQt5.QtTest import *
+from config.kiwoomType import *
 
 class Kiwoom(QAxWidget):
     # container역할
@@ -9,9 +11,12 @@ class Kiwoom(QAxWidget):
         super().__init__()
 
         print("키움 클래스입니다.")
+
+        self.realType = RealType()
         ################################################################### 이벤트 루프 모음
         self.login_event_loop = QEventLoop()
         self.detail_account_info_loop = QEventLoop()
+        self.calculator_event_loop = QEventLoop()
         self.checkLastPageMyStock = False
         self.checkFirstPageMyStock = True
         ##################################################################################
@@ -19,6 +24,9 @@ class Kiwoom(QAxWidget):
         ################################################################## 스크린번호 모음
         self.generalScreenNo = "2000"
         self.screen_calculation_stock = "4000"
+        self.screenRealTimeStock = "5000" # 종목별 할당할 스크린 번호
+        self.screenMemeStock = "6000" # 종목별로 할당할 주문용 스크린 번호
+        self.screenForStartStop = "7000"
         ##################################################################################
 
         #################################################################### 클래스 변수모음
@@ -28,6 +36,9 @@ class Kiwoom(QAxWidget):
         # 계좌관련 변수
         self.use_money = None
         self.use_money_percent = 0.4
+        self.currentCalcCode = None # GetCommData로 일봉차트조회요청 시 다음 600개를 가져오려면 계속 종목코드가 필요한데 이를 전역에 두었다.
+        self.calcData = []
+        self.portfolioStockDict = {}
         ##################################################################################
 
         ############### 실행부분
@@ -39,6 +50,17 @@ class Kiwoom(QAxWidget):
         self.detail_account_info()
         self.detail_account_myStock(first=True)  # 계좌평가잔고내역요청
         self.outstandingStock()
+
+        # 이제 실시간 주식시장에서의 데이터를 불러오기 위해 잠시 주석처리해놓는다
+        # self.calculator_func()  # 종목분석을 위한 함수로 나중에는 실시간 부분을 하나 만들거다
+
+        self.readCode()
+        self.screenNumSetting()
+
+        #장의 시작과 끝을 알려주는 신호를 받기 위해 사용한다
+        self.dynamicCall("SetRealReg(String, String, String, String)", self.screenForStartStop, '',
+                         self.realType.REALTYPE["장시작시간"]["장운영구분"], "0")
+
 
     # PyQt5를 통해 키움 증권프로그램에 접속하기 위한 절차
     def get_ocx_instance(self):
@@ -68,6 +90,7 @@ class Kiwoom(QAxWidget):
 
     #real이벤트와 그냥 이벤트의 차이가 머지? 그리고 컨스트럭터에 위 함수 추가 필요하다
     def real_event_slots(self):
+        self.onReceiveRealData.connect(self.realData_slot)
         # 체결받은 시점이 언제인지 알려주는 이벤트
         self.OnReceiveChejanData.connect(self.chejan_slot)
 
@@ -161,12 +184,13 @@ class Kiwoom(QAxWidget):
             print("trData_slot의 미체결요청에 들어옴")
 
             cnt = self.dynamicCall("GetRepeatCnt(String, String)", sTrCode, sRQName)
+            print("미체결종목 수", cnt)
 
             for i in range(cnt):
                 # A002233이런식의 출력, strip는 strip(...)에서 ...안의 문자열을 문자의 양끝에 있을시 제거해 준다. 만약 공백이면 빈칸을 제거한다.
                 code = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "종목코드")
                 code_name = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "종목명")
-                orderNumber = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "쳬결번호")
+                orderNumber = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "주문번호")
                 orderStatus = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i,
                                                   "주문상태")
                 orderQunat = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "주문수량")
@@ -179,7 +203,7 @@ class Kiwoom(QAxWidget):
 
                 code = code.strip()
                 code_name = code_name.strip()
-                orderNumber = int(orderNumber.strip())
+                orderNumber = orderNumber.strip()
                 orderStatus = orderStatus.strip()
                 orderQunat = int(orderQunat.strip())
                 orderPrice = int(orderPrice.strip())
@@ -187,20 +211,173 @@ class Kiwoom(QAxWidget):
                 print(orderGubun)
                 print(orderGubun0)
                 outstanding = int(outstanding.strip())
-                chekyel = int(chekyel.strip())
+                chekyel = chekyel.strip()
 
                 if orderNumber not in self.outstanding_stock_dict:
                     self.outstanding_stock_dict[orderNumber] = {
                         "종목코드": code,
                         "종목명": code_name,
+                        "주문번호": orderNumber,
                         "주문상태": orderStatus,
-                        "주문가격": learn_rate,
-                        "주문구분": current_price,
-                        "주문수량": total_bought_stock_price,
-                        "미체결수량": possible_quantity_to_sell,
-                        "체결량":
+                        "주문구분": orderGubun0,
+                        "주문가격": orderPrice,
+                        "주문가격": orderPrice,
+                        "주문수량": orderQunat,
+                        "미체결수량": outstanding,
+                        "체결량": chekyel
                     }
 
+            for idx, key in enumerate(self.outstanding_stock_dict):
+                print(idx, key, self.outstanding_stock_dict[key])
+            print("미체결요청 루프 닫기")
+            self.detail_account_info_loop.exit()
+
+        elif sRQName == "주식일봉차트조회요청":
+            print("주식일봉차트조회요청 진입 in trData_slot")
+            # code = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, 0, "종목코드")
+            # code = code.strip()
+            print("%s의 일봉데이터 요청" % self.currentCalcCode) # 이전에 dynamicCall에서 code가져오는 것에서 변경했다
+
+            cnt = self.dynamicCall("GetRepeatCnt(String, String)", sTrCode, sRQName)
+            cnt = int(cnt)
+            print("GetRepeatCnt로 한번에 가져오는 데이터량 %s" % cnt)
+
+            date = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, 0, "일자")
+            lastDate = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, cnt-1, "일자")
+            date = int(date.strip())
+            lastDate = int(lastDate.strip())
+
+            print("가져온 데이터의 처음 일자 ", date, "마지막 일자 ", lastDate)
+
+            # data = self.dynamicCall("GetCommDataEx(String, String)" sTrCode, sRQName) 으로 데이터를 받으면
+            # [['', '현재가', '거래량', '거래대금', ..., '저가', ''], ['', '현재가', '거래량', '거래대금', ..., '저가', ''], ...]
+            for i in range(cnt):
+                data = []
+
+                currentPrice = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "현재가")
+                tradeQunat = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "거래량")
+                cumulQunat = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "거래대금") # 이제까지 거래량의 의한 총 거래된 금액
+                date = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "일자")
+                startPrice = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "시가")
+                highPrice = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "고가")
+                lowPrice = self.dynamicCall("GetCommData(String, String, int, String)", sTrCode, sRQName, i, "저가")
+
+                data.append("") # 이것을 넣주는 것은 나중에 GetCommDataEx를 쓸 때가 있는데 이 때 데이터출력과 형식을 맞춰주기 위해서다
+                data.append(currentPrice.strip())
+                data.append(tradeQunat.strip())
+                data.append(cumulQunat.strip())
+                data.append(date.strip())
+                data.append(startPrice.strip())
+                data.append(highPrice.strip())
+                data.append(lowPrice.strip())
+                data.append("")
+
+                self.calcData.append(data.copy()) #copy()를 하면 shallow copy가 되고 deep이려면 copy.deepcopy(리스트)
+
+            print("calcData 개수 증가 확인하기", len(self.calcData))
+            if sPrevNext == "a":
+                self.day_kiwoom_db(code=self.currentCalcCode, sPrevNext=sPrevNext)
+            else:
+            #어떤 종목에 대한 데이터는 다 불러온 상황
+            #이 데이터를 갖고 종목분석시작
+                length = len(self.calcData)
+                print("총일 수 는", length)
+
+                passAllCond = False
+
+                # 120일 이평선만들기 전에 120치 데이터가 잇는지 확인
+                if length >= 120:   # 120일 이평선 만들기
+                    totalPrice = 0
+
+                    for value in self.calcData[:120]:
+                        totalPrice += int(value[1])
+
+                    movingAvaerage120 = totalPrice / 120 # 확인하려는 시작일을 기준으로 120일 이평선을 만들어
+
+            # 다음의 조건들을 만족해야 그린빌법칙을 확인할 수 잇다
+            # 1. 확인하려는 시작일의 고가와 저가 사이에 120일이평선이 걸쳐있는지 확인
+                    startPriceCond = False
+                    savedStartHPrice = None
+                    startDateLrice = int(self.calcData[0][7])
+                    startDateHPrcie = int(self.calcData[0][6])
+
+                    if movingAvaerage120 >= startDateLrice and movingAvaerage120 <= startDateHPrcie:
+                        print("120일 이평선이 오늘자의 저가와 고가 사이에 걸쳐있어")
+                        startPriceCond = True
+                        savedStartHPrice = startDateHPrcie
+
+                    # 2. 과거 일봉들이 120일 이평선보다 밑에있는지 모두 확인
+                    savedPastLPrice = None
+
+                    if startPriceCond:
+                        movingAvaerage120Past = 0
+                        priceLineCond = False
+
+                        idx = 1
+                        while True:
+
+                            if len(self.calcData[idx:]) < 120:
+                                print("120일치 데이터가 없다.") # 계속 프린터를 해주고 마지막에 프린터는 다 지우는 방법도 좋아보여
+                                break
+
+                            totalPricePast = 0
+
+                            for value in self.calcData[idx:120+idx]:
+                                totalPricePast += int(value[1])
+
+                            movingAvaerage120Past = totalPricePast / 120
+
+                            if movingAvaerage120Past <= int(self.calcData[idx][6]) and idx <= 20:
+                                print("과거 20일 동안 이평선을 넘는 주가 있엇으면 탈락")
+                                break
+
+                            elif int(self.calcData[idx][7]) > movingAvaerage120Past and idx > 20:
+                                print("과거 20일보더 더 과거인 지점 중에서 일봉이 이평선보다 높은 때 확인")
+                                priceLineCond = True
+                                savedPastLPrice = int(self.calcData[idx][7])
+                                break
+
+                            idx += 1
+
+                        #2.번 조건에 걸리는 부분 중 20일 이상 과거에서 2번을 만족하면 해당 부분 이평선이 가장 최근 일자의 이평선 가격보다 낮은지 확인
+                        # 그리고 해당 부분의 주가가 현재의 주가보다 낮은지 확인
+                        if priceLineCond:
+                            if movingAvaerage120 > movingAvaerage120Past and savedStartHPrice > savedPastLPrice:
+                                print("포착된 이평선")
+                                passAllCond = True
+
+
+                passAllCond = True
+
+                if passAllCond:
+                    print("그린빌 매수 4법칙 통과한 종목확인됨")
+
+                    code_nm = self.dynamicCall("GetMasterCodeName(String)", self.currentCalcCode)
+
+                    f = open("files/condition_stock_txt", 'a', encoding="utf8")
+                    f.write("%s\t%s\t%s\n" % (self.currentCalcCode, code_nm, str(self.calcData[0][1])))
+                    f.close()
+
+                else:
+                    print("조건통과 못해서 파일에 추가 x")
+
+                self.calcData.clear()
+                self.calculator_event_loop.exit()
+
+    # 0.02초 정도 마다 받아올 수도 잇는데 한번 시간 확인해봐라
+    def realData_slot(self, sCode, sRealType, sRealData):
+        if sRealType == "장시작시간":
+            fid = self.realType.REALTYPE[sRealType]['장운영구분 ']
+            value = self.dynamicCall("GetCommRealData(string, int", sCode, fid)
+
+            if value == '0':
+                print('장 시작 전')
+            elif value == '3':
+                print('장 시작')
+            elif value == '2':
+                print('장 장료, 동시호가로 넘어감')
+            elif value == '4':
+                print("3시30분 장 종료")
     #OnReceiveChejan에 대한 서버로 부터 리시브받은 데이터 홀용하는 슬롯
     def chejan_slot(self, sGubun, nItenCnt, sFidList):
         sGubun = int(sGubun)
@@ -268,7 +445,6 @@ class Kiwoom(QAxWidget):
     def detail_account_myStock(self, sPrevNext="0", first=False):
         print("계좌평가잔고내역을 요청하는 함수 진입")
 
-
         # 여기선 tr데이터를 받을 때 서버로 어떤 입력값을 보낼지 결정하는 부분 tr데이터는 다 SetInputValue를 사용
         self.dynamicCall("SetInputValue(String, String)", "계좌번호", self.account_num)
         self.dynamicCall("SetInputValue(String, String", "비밀번호", 0000)
@@ -298,10 +474,10 @@ class Kiwoom(QAxWidget):
 
         self.detail_account_info_loop.exec_()
 
-
-
     # 일봉 데이터를 받아와 언제 사야할지를 얘측하는 지표로 쓰려는 거지
     def day_kiwoom_db(self, code=None, date=None, sPrevNext='0'):
+
+        QTest.qWait(3600)
 
         self.dynamicCall("SetInputValue(String, String)", "종목코드", code)
         self.dynamicCall("SetInputValue(String, String)", "수정주가구분", "1")
@@ -311,28 +487,107 @@ class Kiwoom(QAxWidget):
 
         self.dynamicCall("CommRqData(String, String, int, String)", "주식일봉차트조회요청", "opt10081", sPrevNext, self.screen_calculation_stock)
 
+        if sPrevNext == "0":
+            self.calculator_event_loop.exec_()
+
+    def get_kospi_data(self):
+        print("코스피 종목 수 받아오자")
+        kospi = self.dynamicCall("GetCodeListByMarket(int)", 0)
+        kospi = kospi.split(";")[:-1]
+        print(kospi)
+        print(len(kospi))
 
     # 근데 현재 코스탁에 어떠한 종목들이 있는지 알지 못하니 이를 가져와야 할텐데 다행이 기타함수에서 종목가져올 수 있다.
-    def get_event_from_market(self, market_event):
+    def get_code_list_from_market(self, sMakret):
         '''
-        종목코드들 반환
-        :param market_event:
+        종목 코드들 반한
+        :param market_code:
         :return:
         '''
 
-        event_list = self.dynamicCall("GetCodeListByMarket(String", market_event) #"000120;001241;151124;"
-        event_list = event_list.split(';')[:-1]
+        code_list = self.dynamicCall("GetCodeListByMarket(String)", sMakret)
+        code_list = code_list.split(";")[:-1]
 
-        return event_list
+        return code_list
 
     def calculator_func(self):
         '''
-        종목분석 실행용 함수
+        종목분석을 진행하는 함수
         :return:
         '''
 
-        event_list = self.get_event_from_market("10")
-        print("코스닥 개수 %s" % len(event_list))
+        kospi_list = self.get_code_list_from_market(0) # 0을 넣주면 코스피 종목들만 리턴해준다
+        print("코스피 개수 %s" % len(kospi_list))
 
+        for idx, kospiCode in enumerate(kospi_list):
+            self.dynamicCall("DisconnectRealData(String)", self.screen_calculation_stock)  # 꼭 끝어주는 것은 아니나 필요함
 
+            print("%s / %s: KOSPI STOCK CODE: %s is updating..." % (idx+1, len(kospi_list), kospiCode))
+            self.currentCalcCode = kospiCode
+            self.day_kiwoom_db(code=kospiCode)
     # tr요청 3.6초보다 빨리 가져오면 프로그램이 튕기는 문제가 발생한다>
+
+    def readCode(self):
+        if os.path.exists("files/condition_stock.txt"):
+            f = open("files/condtion_stock.txt", "r", encoding="utf8")
+
+            lines = f.readlines()
+            for line in lines:
+                if line != "":
+                    ls = line.split("\t")
+
+                    code = ls[0]
+                    codeName = ls[1]
+                    codePrice = int(ls[2][:-2])  # 8450\n이렇게 되어 있을 것이므로
+
+                    self.portfolioStockDict.update({code: {"종목명": codeName, "현재가": codePrice}})
+
+            f.close()
+
+    # 미체결종목 portfolio에 있는 것들 종목 전체를 하나의 리스트에 넣어
+    def screenNumSetting(self):
+
+        screenOverwrite = []
+
+        # 계좌평가잔고내역에 있는 종목
+        for code in self.account_stock_dict.keys():
+            if code not in screenOverwrite:
+                screenOverwrite.append(code)
+
+        # 미체결에 있는 종목
+        for orderNum in self.outstanding_stock_dict.keys():
+            code = self.outstanding_stock_dict[orderNum]["종목코드"]
+
+            if code not in screenOverwrite:
+                screenOverwrite.appned(code)
+
+        # 포트폴리오에 있는 종목
+        for code in self.portfolioStockDict.keys():
+            if code not in screenOverwrite:
+                screenOverwrite.append(code)
+
+
+        # 스크린번호 할당
+        cnt = 0
+        for code in screenOverwrite:
+            tempScreen = int(self.screenRealTimeStock)
+            memeScreen = int(self.screenMemeStock)
+
+            if (cnt % 50 ) == 0:
+                tempScreen += 1
+                self.screenRealTimeStock = str(tempScreen)
+
+            if (cnt % 50) == 0:
+                memeScreen += 1
+                self.screenMemeStock = str(memeScreen)
+
+            if code in self.portfolioStockDict.keys():
+                self.portfolioStockDict[code].update({"스크린번호": self.screenRealTimeStock,
+                                                      "주문용스크린번호": self.screenMemeStock})
+
+            else:
+                self.portfolioStockDict.update({code: {"스크린번호": self.screenMemeStock,
+                                                       "주문용스크린번호": self.screenMemeStock}})
+
+            cnt += 1
+        print(self.portfolioStockDict)
